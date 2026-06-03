@@ -201,6 +201,56 @@ function buildSoulWaitArgs(soulId) {
   return ["soul-id", "wait", soulId];
 }
 
+/* Parse `higgsfield soul-id list` plaintext output to find the row for
+   our soul id and return its STATUS column. The CLI prints a fixed-width
+   table:
+       ID                                    NAME           TYPE    STATUS
+       7469d0ab-8e94-4c83-947d-aea4ecc7b902  mina-zheng-v1  soul_2  completed
+   Returns null if the soul id isn't in the table yet. */
+function parseSoulListStatus(stdout, soulId) {
+  const text = String(stdout || "");
+  const target = String(soulId).toLowerCase();
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || /^id\s/i.test(line)) continue;       // skip blank + header
+    const cols = line.split(/\s+/);
+    if (cols[0] && cols[0].toLowerCase() === target) {
+      return cols[cols.length - 1].toLowerCase();      // last column = STATUS
+    }
+  }
+  return null;
+}
+
+const SOUL_POLL_INTERVAL_MS = Number(process.env.SOUL_POLL_INTERVAL_MS || 15_000);
+
+/* Poll `soul-id list` until the soul shows up as `completed`, or one of
+   the failure terminal states. Returns when complete; throws on timeout
+   or on a failure status. */
+async function pollSoulUntilComplete(soulId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = null;
+  while (Date.now() < deadline) {
+    let out;
+    try {
+      out = await exec(CLI, ["soul-id", "list"], { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
+    } catch (e) {
+      // Non-fatal — try again next tick. Keep the last error for the final throw.
+      lastStatus = `list-failed: ${e.stderr || e.message}`;
+      await new Promise((r) => setTimeout(r, SOUL_POLL_INTERVAL_MS));
+      continue;
+    }
+    const status = parseSoulListStatus(out.stdout, soulId);
+    if (status) lastStatus = status;
+    if (status === "completed" || status === "ready" || status === "done") return status;
+    if (status === "failed" || status === "error" || status === "cancelled") {
+      throw new Error(`soul-id ${soulId} terminal status=${status}`);
+    }
+    // status === null (not in list yet) OR "training"/"queued" → keep waiting
+    await new Promise((r) => setTimeout(r, SOUL_POLL_INTERVAL_MS));
+  }
+  throw new Error(`timed out waiting for soul-id ${soulId} (last seen status: ${lastStatus || "not in list"})`);
+}
+
 /* Try to find a Soul ID UUID in the CLI's output (similar to extractResultUrl).
    We probe common JSON shapes and fall back to scanning stdout for a UUID. */
 function extractSoulId(stdout) {
@@ -272,22 +322,10 @@ export async function trainSoulId({ name, imagePaths }) {
   }
   const { soulId } = extractSoulId(createOut.stdout);
 
-  // Step 2: block until training finishes. Falls back to a poll loop if the
-  // `wait` subcommand isn't recognized by this CLI build.
-  let waitOut = { stdout: "", stderr: "" };
-  try {
-    waitOut = await exec(CLI, buildSoulWaitArgs(soulId), {
-      timeout: TRAINING_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-  } catch (e) {
-    const detail = [
-      e.stderr && `stderr: ${String(e.stderr).trim()}`,
-      e.stdout && `stdout: ${String(e.stdout).trim()}`,
-      e.code != null && `exit: ${e.code}`,
-    ].filter(Boolean).join(" | ");
-    throw new Error(`soul-id wait ${soulId} failed${detail ? ` — ${detail}` : ` (no stderr; e.message=${e.message})`}`);
-  }
+  // Step 2: poll `soul-id list` until the soul completes. We don't use
+  // `soul-id wait` because it renders an interactive progress UI that
+  // requires a TTY; under execFile it exits silently with no stderr.
+  const finalStatus = await pollSoulUntilComplete(soulId, TRAINING_TIMEOUT_MS);
   const elapsedMs = Date.now() - started;
 
   return {
@@ -296,10 +334,9 @@ export async function trainSoulId({ name, imagePaths }) {
       name,
       imageCount: imagePaths.length,
       elapsedMs,
+      finalStatus,
       createStdoutTail: String(createOut.stdout).slice(-400),
       createStderrTail: String(createOut.stderr).slice(-400),
-      waitStdoutTail:   String(waitOut.stdout).slice(-400),
-      waitStderrTail:   String(waitOut.stderr).slice(-400),
     },
   };
 }

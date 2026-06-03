@@ -1,0 +1,96 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ugc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ugc}
+      POSTGRES_DB: ${POSTGRES_DB:-ugc}
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ugc} -d ${POSTGRES_DB:-ugc}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ugc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ugc}
+      POSTGRES_DB: ${POSTGRES_DB:-ugc}
+      PORT: 3000
+      STATIC_DIR: /app/web
+    ports:
+      - "${WEB_PORT:-8080}:3000"
+    volumes:
+      - ./web:/app/web:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  mcp:
+    build: ./mcp
+    restart: unless-stopped
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ugc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ugc}
+      POSTGRES_DB: ${POSTGRES_DB:-ugc}
+      PORT: 3100
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      API_BASE: http://api:3000
+    ports:
+      - "${MCP_PORT:-3100}:3100"
+    depends_on:
+      - api
+
+  # Polls planned_posts for status='approved' and runs Higgsfield generations.
+  # MOCK_GENERATOR defaults to 'true' so you can validate the pipeline without
+  # burning credits. Once you've run `higgsfield auth login` inside this
+  # container, set MOCK_GENERATOR=false in .env and `docker compose up -d generator`.
+  generator:
+    build: ./generator
+    restart: unless-stopped
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ugc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ugc}
+      POSTGRES_DB: ${POSTGRES_DB:-ugc}
+      PORT: 3200
+      MOCK_GENERATOR: ${GENERATOR_MOCK:-true}
+      MAX_CONCURRENT: ${GENERATOR_MAX_CONCURRENT:-4}
+      POLL_INTERVAL_MS: ${GENERATOR_POLL_MS:-5000}
+      DEFAULT_GENERATION_MODEL: ${GENERATOR_DEFAULT_MODEL:-higgsfield-ai/soul/standard}
+    ports:
+      - "${GENERATOR_PORT:-3200}:3200"
+    volumes:
+      # Persist the Higgsfield OAuth token across rebuilds
+      - ./generator/auth:/root/.higgsfield
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Cloudflare Tunnel — only starts when explicitly enabled via
+  # `docker-compose --profile tunnel up -d`. Configure the token in .env and
+  # the ingress rules in the Cloudflare dashboard.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - api
+      - mcp
+
+volumes:
+  db_data:

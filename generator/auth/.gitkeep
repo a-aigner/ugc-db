@@ -1,0 +1,1 @@
+# Higgsfield CLI persists auth here. Mounted as a volume so it survives container rebuilds.

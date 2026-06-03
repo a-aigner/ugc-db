@@ -253,10 +253,23 @@ export async function trainSoulId({ name, imagePaths }) {
   // Step 1: kick off training. Returns immediately with the new soul id.
   const createArgs = buildSoulCreateArgs({ name, imagePaths });
   const started = Date.now();
-  const createOut = await exec(CLI, createArgs, {
-    timeout: 60_000,             // creating the job is fast; only the wait blocks
-    maxBuffer: 4 * 1024 * 1024,
-  });
+  let createOut;
+  try {
+    createOut = await exec(CLI, createArgs, {
+      timeout: 60_000,             // creating the job is fast; only the wait blocks
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (e) {
+    // Default e.message from execFile is just "Command failed: <cmd>" — the
+    // real reason lives on e.stderr/e.stdout. Surface both so the failure
+    // reason makes it into soul_trainings.error.
+    const detail = [
+      e.stderr && `stderr: ${String(e.stderr).trim()}`,
+      e.stdout && `stdout: ${String(e.stdout).trim()}`,
+      e.code != null && `exit: ${e.code}`,
+    ].filter(Boolean).join(" | ");
+    throw new Error(`soul-id create failed${detail ? ` — ${detail}` : ` (no stderr; e.message=${e.message})`}`);
+  }
   const { soulId } = extractSoulId(createOut.stdout);
 
   // Step 2: block until training finishes. Falls back to a poll loop if the
@@ -268,8 +281,12 @@ export async function trainSoulId({ name, imagePaths }) {
       maxBuffer: 4 * 1024 * 1024,
     });
   } catch (e) {
-    // Surface the actual stderr so we can see what went wrong.
-    throw new Error(`soul-id wait ${soulId} failed: ${e.stderr || e.message}`);
+    const detail = [
+      e.stderr && `stderr: ${String(e.stderr).trim()}`,
+      e.stdout && `stdout: ${String(e.stdout).trim()}`,
+      e.code != null && `exit: ${e.code}`,
+    ].filter(Boolean).join(" | ");
+    throw new Error(`soul-id wait ${soulId} failed${detail ? ` — ${detail}` : ` (no stderr; e.message=${e.message})`}`);
   }
   const elapsedMs = Date.now() - started;
 

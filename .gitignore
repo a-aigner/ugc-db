@@ -4,3 +4,8 @@ node_modules/
 *.log
 .superpowers/
 
+# Higgsfield CLI credentials written into ./generator/auth/ by the
+# container so they survive rebuilds — never commit them.
+generator/auth/*
+!generator/auth/.gitkeep
+

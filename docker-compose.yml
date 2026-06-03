@@ -79,8 +79,14 @@ services:
     ports:
       - "${GENERATOR_PORT:-3200}:3200"
     volumes:
-      # Persist the Higgsfield OAuth token across rebuilds
-      - ./generator/auth:/root/.higgsfield
+      # Persist the Higgsfield CLI credentials across rebuilds.
+      # The CLI writes credentials.json + update.json under XDG_CONFIG_HOME,
+      # which resolves to /root/.config/higgsfield (verified: `find / -mmin -240`).
+      - ./generator/auth:/root/.config/higgsfield
+      # Live-mount the worker JS so edits don't require a rebuild.
+      - ./generator/higgsfield.js:/app/higgsfield.js:ro
+      - ./generator/worker.js:/app/worker.js:ro
+      - ./generator/server.js:/app/server.js:ro
     depends_on:
       db:
         condition: service_healthy

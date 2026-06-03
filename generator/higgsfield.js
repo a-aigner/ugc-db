@@ -167,27 +167,38 @@ export async function probe() {
 }
 
 /* ============================================================
-   Soul ID training — verified CLI command from
+   Soul ID training — verified CLI commands from
    https://github.com/higgsfield-ai/cli README:
 
+     # 1. Kick off training (returns the soul id immediately):
      higgsfield soul-id create --name me --soul-2 \
        --image ./me1.jpg --image ./me2.jpg --image ./me3.jpg
 
+     # 2. Block until training finishes (separate subcommand):
+     higgsfield soul-id wait <soul_id>
+
    --soul-2 opts into Soul V2 (newer/better). --image accepts 1+
    instances; Higgsfield recommends 10-20 photos for best identity
-   preservation, 3 minimum. Training takes ~3 minutes; --wait blocks
-   until done.
+   preservation, 3 minimum. Training takes ~3 minutes.
+
+   NOTE: `--wait` and `--json` are only valid on `generate create` —
+   they're NOT accepted by `soul-id create` / `soul-id wait`. We parse
+   the soul id from `soul-id create`'s plaintext stdout, then call
+   `soul-id wait` to block.
 
    Mock mode returns a fake Soul ID after a short delay.
    ============================================================ */
 const TRAINING_TIMEOUT_MS = Number(process.env.SOUL_TRAINING_TIMEOUT_MS || 10 * 60 * 1000);
 const SOUL_V2_FLAG = "--soul-2";
 
-function buildSoulTrainArgs({ name, imagePaths }) {
+function buildSoulCreateArgs({ name, imagePaths }) {
   const args = ["soul-id", "create", "--name", name, SOUL_V2_FLAG];
   for (const p of imagePaths) args.push("--image", p);
-  args.push("--wait", "--json");
   return args;
+}
+
+function buildSoulWaitArgs(soulId) {
+  return ["soul-id", "wait", soulId];
 }
 
 /* Try to find a Soul ID UUID in the CLI's output (similar to extractResultUrl).
@@ -234,19 +245,33 @@ export async function trainSoulId({ name, imagePaths }) {
         mock: true,
         name,
         imageCount: imagePaths.length,
-        cliArgs: buildSoulTrainArgs({ name, imagePaths }).join(" "),
+        cliArgs: buildSoulCreateArgs({ name, imagePaths }).join(" "),
       },
     };
   }
 
-  const args = buildSoulTrainArgs({ name, imagePaths });
+  // Step 1: kick off training. Returns immediately with the new soul id.
+  const createArgs = buildSoulCreateArgs({ name, imagePaths });
   const started = Date.now();
-  const { stdout, stderr } = await exec(CLI, args, {
-    timeout: TRAINING_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024,
+  const createOut = await exec(CLI, createArgs, {
+    timeout: 60_000,             // creating the job is fast; only the wait blocks
+    maxBuffer: 4 * 1024 * 1024,
   });
+  const { soulId } = extractSoulId(createOut.stdout);
+
+  // Step 2: block until training finishes. Falls back to a poll loop if the
+  // `wait` subcommand isn't recognized by this CLI build.
+  let waitOut = { stdout: "", stderr: "" };
+  try {
+    waitOut = await exec(CLI, buildSoulWaitArgs(soulId), {
+      timeout: TRAINING_TIMEOUT_MS,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (e) {
+    // Surface the actual stderr so we can see what went wrong.
+    throw new Error(`soul-id wait ${soulId} failed: ${e.stderr || e.message}`);
+  }
   const elapsedMs = Date.now() - started;
-  const { soulId, raw } = extractSoulId(stdout);
 
   return {
     soulId,
@@ -254,8 +279,10 @@ export async function trainSoulId({ name, imagePaths }) {
       name,
       imageCount: imagePaths.length,
       elapsedMs,
-      stdoutTail: String(stdout).slice(-400),
-      stderrTail: String(stderr).slice(-400),
+      createStdoutTail: String(createOut.stdout).slice(-400),
+      createStderrTail: String(createOut.stderr).slice(-400),
+      waitStdoutTail:   String(waitOut.stdout).slice(-400),
+      waitStderrTail:   String(waitOut.stderr).slice(-400),
     },
   };
 }

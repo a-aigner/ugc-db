@@ -8,11 +8,103 @@ const STATUS_DESCRIPTIONS = {
   approved:   "Approved — queued for the generator to pick up.",
   generating: "Generating image — refresh in a few seconds.",
   generated:  "Image ready — review side-by-side and decide.",
-  accepted:   "Accepted — ready to push to fleetmanager.",
+  accepted:   "Accepted — pushing to fleetmanager…",
   rejected:   "Rejected. Re-plan or delete.",
-  pushed:     "Pushed to fleetmanager.",
+  pushed:     "Scheduled in fleetmanager — waiting for Instagram to publish.",
   posted:     "Posted to Instagram.",
 };
+
+function FleetHandoffPanel({ post, onPostChange }) {
+  // Polls the post when status=accepted to surface the push outcome.
+  // Also exposes a "Retry push" button when there's a last_push_error.
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState(null);
+
+  useEffect(() => {
+    if (post.status !== "accepted") return;
+    if (post.lastPushError) return;  // already failed — no polling
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const fresh = await window.DB.plannedPosts.get(post.id);
+        if (cancelled) return;
+        if (fresh.status !== post.status || fresh.lastPushError) {
+          onPostChange(fresh);
+        }
+      } catch {}
+    };
+    const iv = setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [post.id, post.status, post.lastPushError]);
+
+  const retry = async () => {
+    setRetrying(true); setRetryError(null);
+    try {
+      await window.DB.plannedPosts.push(post.id);
+      const fresh = await window.DB.plannedPosts.get(post.id);
+      onPostChange(fresh);
+    } catch (e) {
+      setRetryError(e.message || String(e));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  if (post.status === "pushed") {
+    return (
+      <div className="block" style={{ marginTop: 16, background: "var(--success-soft, oklch(0.96 0.04 145))", border: "1px solid oklch(0.85 0.08 145)", borderRadius: 10, padding: "12px 14px" }}>
+        <h4 className="block-label" style={{ color: "oklch(0.45 0.14 145)" }}>
+          <Icon name="check" size={14} /> Pushed to fleetmanager
+        </h4>
+        <div className="draft-context-row">
+          <span className="draft-context-label">Content</span>
+          <span className="draft-context-val mono">{post.fleetContentId}</span>
+        </div>
+        <div className="draft-context-row">
+          <span className="draft-context-label">Scheduled</span>
+          <span className="draft-context-val mono">{post.fleetScheduledPostId}</span>
+        </div>
+        {post.pushedAt && (
+          <div className="draft-context-row">
+            <span className="draft-context-label">When</span>
+            <span className="draft-context-val">{new Date(post.pushedAt).toLocaleString()}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (post.status === "accepted" && post.lastPushError) {
+    return (
+      <div className="block" style={{ marginTop: 16, background: "var(--danger-soft)", border: "1px solid oklch(0.85 0.06 25)", borderRadius: 10, padding: "12px 14px" }}>
+        <h4 className="block-label" style={{ color: "var(--danger)" }}>
+          <Icon name="x" size={14} /> Push to fleetmanager failed
+        </h4>
+        <p className="block-text mono" style={{ fontSize: 12.5 }}>{post.lastPushError}</p>
+        {retryError && (
+          <p className="block-text mono" style={{ fontSize: 12.5, color: "var(--danger)" }}>Retry error: {retryError}</p>
+        )}
+        <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+          <button className="btn primary sm" onClick={retry} disabled={retrying}>
+            <Icon name="upload" size={14} stroke={2.2} /> {retrying ? "Retrying…" : "Retry push"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (post.status === "accepted") {
+    return (
+      <div className="block" style={{ marginTop: 16, background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: 10, padding: "12px 14px" }}>
+        <p style={{ fontSize: 13, color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+          Pushing to fleetmanager…
+        </p>
+      </div>
+    );
+  }
+
+  return null;
+}
 
 function PersonaContextPanel({ persona, post }) {
   if (!persona) return null;
@@ -274,6 +366,9 @@ function DraftReview({
 
         {/* ARC CONTEXT */}
         {arc && <ArcContextPanel arc={arc} />}
+
+        {/* FLEET HANDOFF — pushing / pushed / failed */}
+        <FleetHandoffPanel post={post} onPostChange={onPostChange} />
 
         {/* PREVIOUS REJECTION (if re-planning) */}
         {wasRejected && post.rejectionReason && (

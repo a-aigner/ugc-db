@@ -9,6 +9,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { samplePersonas, sampleFamily, sampleRelationship } from "./samples.js";
+import * as fleet from "./fleet.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = process.env.STATIC_DIR || path.join(__dirname, "..", "web");
@@ -1470,6 +1471,8 @@ function rowToPlannedPost(r) {
     regenerationFeedback: r.regeneration_feedback ?? "",
     fleetContentId: r.fleet_content_id ?? null,
     fleetScheduledPostId: r.fleet_scheduled_post_id ?? null,
+    lastPushError: r.last_push_error ?? null,
+    pushedAt: r.pushed_at ? new Date(r.pushed_at).toISOString() : null,
     status: r.status,
     rejectionReason: r.rejection_reason ?? "",
     notes: r.notes ?? "",
@@ -1849,14 +1852,160 @@ app.patch("/api/planned-posts/:id/status", async (req, res, next) => {
       args.push(b.generationMetadata);
       fields.push(`generation_metadata=$${args.length}`);
     }
+    // Clear stale push error when transitioning into a non-accepted state.
+    if (b.status !== "accepted" && b.status !== "pushed") {
+      fields.push(`last_push_error=NULL`);
+    }
     const r = await pool.query(
       `UPDATE planned_posts SET ${fields.join(", ")} WHERE id=$1 RETURNING *`,
       args,
     );
     if (r.rowCount === 0) return res.status(404).json({ error: "not found" });
-    res.json(rowToPlannedPost(r.rows[0]));
+    const post = rowToPlannedPost(r.rows[0]);
+
+    // Auto-push: when a generated image is accepted, fire the handoff in the
+    // background and respond immediately. The UI polls and will see the
+    // status flip to 'pushed' (or surface last_push_error on failure).
+    if (b.status === "accepted" && fleet.fleetEnabled()) {
+      pushPlannedPostAsync(req.params.id).catch((e) => {
+        console.warn(`[fleet] background push failed for ${req.params.id}:`, e.message);
+      });
+    }
+
+    res.json(post);
   } catch (e) { next(e); }
 });
+
+/* ---------- fleetmanager handoff ---------- */
+
+/** Manual retry endpoint — re-pushes a planned_post. */
+app.post("/api/planned-posts/:id/push", async (req, res, next) => {
+  try {
+    if (!fleet.fleetEnabled()) {
+      return res.status(503).json({
+        error: "Fleetmanager integration not enabled",
+        fleet: fleet.fleetConfigSummary(),
+      });
+    }
+    const result = await pushPlannedPostAsync(req.params.id);
+    res.json(result);
+  } catch (e) {
+    // Already-pushed / not-found / push errors come back through normally.
+    if (e instanceof fleet.FleetError) {
+      return res.status(400).json({ error: e.message, code: e.code });
+    }
+    next(e);
+  }
+});
+
+/** Read-only status of fleet integration. */
+app.get("/api/fleet/status", (_req, res) => {
+  res.json({
+    ...fleet.fleetConfigSummary(),
+    ready: fleet.fleetEnabled(),
+  });
+});
+
+/**
+ * Push a planned_post to fleetmanager and persist the result.
+ * Throws FleetError on failure. Used by both auto-push and manual retry.
+ */
+async function pushPlannedPostAsync(plannedPostId) {
+  // Load the planned_post + persona Instagram handle + generated image bytes.
+  const row = await pool.query(
+    `SELECT pp.*, p.id AS persona_id_real
+       FROM planned_posts pp
+       JOIN personas p ON p.id = pp.persona_id
+      WHERE pp.id = $1`,
+    [plannedPostId],
+  );
+  if (row.rowCount === 0) throw new fleet.FleetError("NOT_FOUND", `planned_post ${plannedPostId} not found`);
+  const pp = row.rows[0];
+
+  if (pp.platform !== "instagram") {
+    throw new fleet.FleetError("UNSUPPORTED_PLATFORM",
+      `fleetmanager handoff only supports instagram (this post: ${pp.platform})`);
+  }
+  if (!pp.scheduled_at) {
+    throw new fleet.FleetError("MISSING_SCHEDULED_AT", "planned_post has no scheduled_at");
+  }
+
+  // Find the persona's Instagram handle.
+  const handleRow = await pool.query(
+    `SELECT handle FROM socials
+      WHERE persona_id=$1 AND platform='instagram' AND handle IS NOT NULL
+      ORDER BY position LIMIT 1`,
+    [pp.persona_id],
+  );
+  if (handleRow.rowCount === 0) {
+    throw new fleet.FleetError("NO_HANDLE", "persona has no instagram handle in socials");
+  }
+  const personaHandle = handleRow.rows[0].handle;
+
+  // Resolve the image to push: prefer the generated image, fall back to the
+  // library asset's image (so library-only posts like landscapes also push).
+  let imageId = pp.generated_image_id;
+  if (!imageId && pp.library_asset_id) {
+    const la = await pool.query(`SELECT image_id FROM library_assets WHERE id=$1`, [pp.library_asset_id]);
+    imageId = la.rows[0]?.image_id || null;
+  }
+
+  if (!imageId && pp.story_type !== "text_overlay" && pp.story_type !== "feed_repost") {
+    throw new fleet.FleetError("MISSING_IMAGE",
+      `planned_post has no generated image and no library asset (story_type=${pp.story_type || "?"})`);
+  }
+
+  let imageBytes = null;
+  let mimeType = "image/jpeg";
+  if (imageId) {
+    const img = await pool.query(`SELECT data, mime_type FROM images WHERE id=$1`, [imageId]);
+    if (img.rowCount === 0) throw new fleet.FleetError("IMAGE_NOT_FOUND", `image ${imageId} not found`);
+    imageBytes = img.rows[0].data;
+    mimeType = img.rows[0].mime_type || "image/jpeg";
+  }
+
+  // Push!
+  let result;
+  try {
+    result = await fleet.pushPlannedPost({
+      personaHandle,
+      postType: pp.post_type,
+      caption: pp.caption || "",
+      hashtags: pp.hashtags || [],
+      scheduledAt: new Date(pp.scheduled_at).toISOString(),
+      imageBytes,
+      mimeType,
+      title: `${pp.post_type} ${plannedPostId.slice(0, 8)}`,
+    });
+  } catch (e) {
+    // Persist the error message for the UI.
+    await pool.query(
+      `UPDATE planned_posts SET last_push_error=$2 WHERE id=$1`,
+      [plannedPostId, e.message || String(e)],
+    );
+    throw e;
+  }
+
+  // Persist success.
+  await pool.query(
+    `UPDATE planned_posts
+        SET fleet_content_id=$2,
+            fleet_scheduled_post_id=$3,
+            pushed_at=NOW(),
+            last_push_error=NULL,
+            status='pushed'
+      WHERE id=$1`,
+    [plannedPostId, result.fleetContentId, result.fleetScheduledPostId],
+  );
+
+  return {
+    plannedPostId,
+    fleetContentId: result.fleetContentId,
+    fleetScheduledPostId: result.fleetScheduledPostId,
+    accountId: result.accountId,
+    accountHandle: result.account?.handle,
+  };
+}
 
 app.delete("/api/planned-posts/:id", async (req, res, next) => {
   try {

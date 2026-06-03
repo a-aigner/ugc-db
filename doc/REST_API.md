@@ -865,6 +865,67 @@ Idempotent — loads four sample personas + one sample family (The Riveras) + on
 
 ---
 
+# Fleetmanager handoff
+
+When `FLEET_ENABLED=true` and a planned post transitions to `accepted`, ugc-db
+asynchronously pushes the post into fleetmanager. See
+[FLEET_HANDOFF.md](./FLEET_HANDOFF.md) for the full flow.
+
+#### `GET /api/fleet/status`
+
+Read-only diagnostic. Returns:
+
+```json
+{
+  "enabled": true,
+  "configured": true,
+  "baseUrl": "http://api.fleetmanager:4000",
+  "hasToken": true,
+  "ready": true
+}
+```
+
+`ready` is `enabled && configured`. When `ready` is false, no auto-push or
+manual push will run.
+
+#### `POST /api/planned-posts/:id/push`
+
+Manually trigger a fleet push (used by the **Retry push** button in Draft
+Review and by the `push_to_fleet` MCP tool). Required when an auto-push fails
+and the user wants to retry after fixing the underlying issue.
+
+Returns:
+
+```json
+{
+  "plannedPostId": "<uuid>",
+  "fleetContentId": "<id from fleetmanager>",
+  "fleetScheduledPostId": "<id>",
+  "accountId": "<fleetmanager account id>",
+  "accountHandle": "maya.moves"
+}
+```
+
+On failure, returns 400 with `{ error, code }` where `code` is one of
+`ACCOUNT_NOT_FOUND`, `NO_HANDLE`, `MISSING_IMAGE`, `NETWORK`, `HTTP_4xx`,
+etc. The error message is also persisted to `planned_posts.last_push_error`.
+
+503 if `FLEET_ENABLED=false` or token/url not configured (response includes
+the `fleet_config_summary`).
+
+#### planned_posts payload additions
+
+The `planned_posts` REST payload now includes:
+
+| Field | Type | Notes |
+|---|---|---|
+| `fleetContentId` | string \| null | Content id in fleetmanager (after push) |
+| `fleetScheduledPostId` | string \| null | Scheduled-post id in fleetmanager |
+| `lastPushError` | string \| null | Last error message from a push attempt; cleared on success or status change away from `accepted`/`pushed` |
+| `pushedAt` | ISO 8601 \| null | When the post was successfully pushed |
+
+---
+
 # Health
 
 #### `GET /api/health`

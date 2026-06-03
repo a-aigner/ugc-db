@@ -788,6 +788,67 @@ rejected  rejected                rejected   (terminal)
 
 ---
 
+## `fleet_status`
+
+**Purpose.** Check whether the fleetmanager integration is enabled and configured. Call this before suggesting a handoff so you can tell the user when the integration is offline.
+
+**Input.** None.
+
+**Output.**
+
+```json
+{
+  "enabled": true,
+  "configured": true,
+  "baseUrl": "http://api.fleetmanager:4000",
+  "hasToken": true,
+  "ready": true
+}
+```
+
+`ready: false` means no push will run — either `FLEET_ENABLED` is unset or the URL/token are missing.
+
+---
+
+## `push_to_fleet`
+
+**Purpose.** Push a planned post to fleetmanager for actual Instagram scheduling. Use after the user has accepted the generated image, or for `text_overlay` / `feed_repost` posts that skip image generation. Also the canonical retry mechanism when an auto-push fails.
+
+The post should be at status `accepted` (or already pushed — re-push is idempotent on fleetmanager's side, but you'll get duplicate scheduled posts there).
+
+**Input.**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `planned_post_id` | string | yes | ugc-db planned_post id |
+
+**Output (success).**
+
+```json
+{
+  "message": "Pushed to fleetmanager. Post status is now 'pushed'.",
+  "plannedPostId": "...",
+  "fleetContentId": "...",
+  "fleetScheduledPostId": "...",
+  "accountId": "...",
+  "accountHandle": "maya.moves"
+}
+```
+
+**Errors.** Common codes:
+
+- `ACCOUNT_NOT_FOUND` — persona's normalized handle doesn't match any fleetmanager IG account
+- `NO_HANDLE` — persona has no instagram handle in `socials`
+- `UNSUPPORTED_POST_TYPE` — only `ig_feed` / `ig_story` / `ig_carousel` are supported
+- `MISSING_IMAGE` — persona/library posts must have a generated image or library asset; `text_overlay` / `feed_repost` exempt
+- `NETWORK` — fleetmanager unreachable
+- `HTTP_401` — bad `FLEET_TOKEN`
+- `FLEET_DISABLED` — `FLEET_ENABLED=false` or URL/token not set
+
+See [FLEET_HANDOFF.md](./FLEET_HANDOFF.md) for the full flow and remediation steps.
+
+---
+
 # Error responses
 
 Every tool may return `isError: true` with a JSON error payload in its text content:

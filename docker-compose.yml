@@ -28,6 +28,11 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-ugc}
       PORT: 3000
       STATIC_DIR: /app/web
+      # Fleetmanager handoff — set FLEET_ENABLED=true once both stacks share a
+      # network and the bearer token is provisioned. See doc/FLEET_HANDOFF.md.
+      FLEET_ENABLED: ${FLEET_ENABLED:-false}
+      FLEET_BASE_URL: ${FLEET_BASE_URL:-}
+      FLEET_TOKEN: ${FLEET_TOKEN:-}
     ports:
       - "${WEB_PORT:-8080}:3000"
     volumes:
@@ -94,3 +99,8 @@ services:
 
 volumes:
   db_data:
+
+# To share a network with fleetmanager's api container, create an override
+# file (docker-compose.fleet.yml) — see doc/FLEET_HANDOFF.md for the recipe.
+# We don't declare the shared network here because it would force users
+# without fleetmanager to create it before `docker compose up` works.

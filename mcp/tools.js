@@ -625,6 +625,40 @@ async function assign_library_to_post({ planned_post_id, library_asset_id }) {
   return { content: [{ type: "text", text: JSON.stringify(post, null, 2) }] };
 }
 
+async function push_to_fleet({ planned_post_id }) {
+  if (!planned_post_id) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: "planned_post_id required" }) }],
+      isError: true,
+    };
+  }
+  try {
+    const result = await apiPost(`/api/planned-posts/${planned_post_id}/push`, {});
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          message: "Pushed to fleetmanager. Post status is now 'pushed'.",
+          ...result,
+        }, null, 2),
+      }],
+    };
+  } catch (e) {
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ error: e.message, upstreamStatus: e.upstreamStatus }),
+      }],
+      isError: true,
+    };
+  }
+}
+
+async function fleet_status() {
+  const s = await apiGet(`/api/fleet/status`);
+  return { content: [{ type: "text", text: JSON.stringify(s, null, 2) }] };
+}
+
 /* ---------- tool registry ---------- */
 
 export const TOOLS = [
@@ -997,6 +1031,27 @@ export const TOOLS = [
       required: ["persona"],
     },
     handler: (args) => get_soul_trainings(args),
+  },
+
+  {
+    name: "push_to_fleet",
+    description:
+      "Push a planned post to fleetmanager for actual Instagram scheduling. Use after the user has accepted the generated image (or for text_overlay/feed_repost posts that don't need generation). The post must have status='accepted' (or be re-pushable from there). On success, the post's status flips to 'pushed' and fleet_content_id / fleet_scheduled_post_id are populated. Errors come back with the failure reason — the post stays at 'accepted' so you can retry.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        planned_post_id: { type: "string", description: "ugc-db planned_post id" },
+      },
+      required: ["planned_post_id"],
+    },
+    handler: (args) => push_to_fleet(args),
+  },
+  {
+    name: "fleet_status",
+    description:
+      "Check whether the fleetmanager integration is enabled and configured (FLEET_ENABLED, FLEET_BASE_URL, FLEET_TOKEN). Returns { enabled, configured, baseUrl, hasToken, ready }. Call this before suggesting handoff so you can tell the user if the integration is offline.",
+    inputSchema: { type: "object", properties: {} },
+    handler: () => fleet_status(),
   },
 ];
 

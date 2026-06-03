@@ -201,6 +201,13 @@
     async assignLibrary(postId, libraryAssetId) {
       return await jsend("POST", `/planned-posts/${postId}/library`, { libraryAssetId });
     },
+    /** Manually trigger / retry a fleetmanager push. */
+    async push(id) { return await jsend("POST", `/planned-posts/${id}/push`, {}); },
+  };
+
+  /* ---------- fleet integration status ---------- */
+  const fleet = {
+    async status() { return await jget(`/fleet/status`); },
   };
 
   /* ---------- library assets ---------- */
@@ -247,6 +254,7 @@
   window.DB.plannedPosts = plannedPosts;
   window.DB.library = library;
   window.DB.soul = soulTraining;
+  window.DB.fleet = fleet;
 
   window.api = {
     uploadImage,

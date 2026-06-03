@@ -413,6 +413,8 @@ CREATE TABLE planned_posts (
 
     fleet_content_id        TEXT,
     fleet_scheduled_post_id TEXT,
+    last_push_error         TEXT,
+    pushed_at               TIMESTAMPTZ,
 
     status                  TEXT NOT NULL DEFAULT 'planned',
     rejection_reason        TEXT,
@@ -425,6 +427,7 @@ CREATE INDEX planned_posts_arc_idx       ON planned_posts (arc_id);
 CREATE INDEX planned_posts_persona_idx   ON planned_posts (persona_id);
 CREATE INDEX planned_posts_status_idx    ON planned_posts (status);
 CREATE INDEX planned_posts_scheduled_idx ON planned_posts (scheduled_at);
+CREATE INDEX planned_posts_push_error_idx ON planned_posts (status) WHERE last_push_error IS NOT NULL;
 
 CREATE TRIGGER planned_posts_touch
 BEFORE UPDATE ON planned_posts

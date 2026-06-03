@@ -1,0 +1,30 @@
+# Compose override for fleetmanager handoff via a shared Docker network.
+#
+# Use when both ugc-db and fleetmanager run on the same Docker host and you
+# want internal-network communication (no Cloudflare hop, lower latency).
+#
+# Setup:
+#   1. Create the shared network once:
+#        docker network create ai-stack
+#   2. Add the same fragment to fleetmanager's compose (attach its api
+#      service to the ai-stack network).
+#   3. Issue a long-lived token in fleetmanager and put it in .env:
+#        FLEET_ENABLED=true
+#        FLEET_BASE_URL=http://api.fleetmanager:4000
+#        FLEET_TOKEN=eyJ...
+#   4. Bring ugc-db up with this override:
+#        docker compose -f docker-compose.yml -f docker-compose.fleet.yml up -d
+#
+# If you'd rather call fleetmanager via its Cloudflare URL (Option B), skip
+# this file — just set FLEET_BASE_URL=https://api.fleet.your-domain in .env.
+
+services:
+  api:
+    networks:
+      - default
+      - fleet
+
+networks:
+  fleet:
+    name: ${FLEET_NETWORK:-ai-stack}
+    external: true
